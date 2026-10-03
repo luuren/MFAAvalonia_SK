@@ -1,4 +1,5 @@
-﻿using CommunityToolkit.Mvvm.ComponentModel;
+using Avalonia.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
 using MFAAvalonia.Configuration;
 using MFAAvalonia.Extensions;
 using MFAAvalonia.Extensions.MaaFW;
@@ -165,8 +166,25 @@ public partial class DragItemViewModel : ObservableObject
         set
         {
             SetProperty(ref _enableSetting, value);
-            OwnerViewModel?.RequestSetOption(this, value);
+            DispatchSetOption(value);
         }
+    }
+
+    /// <summary>
+    /// 把"是否展开设置面板"的请求转交给界面。展开/收起会直接操作 Avalonia 控件，
+    /// 而 <see cref="EnableSetting"/> 也可能由后台线程赋值——MaaProcessor 在命令线程上
+    /// 重建任务列表（TaskLoader.CreateSettingItem）时就会走这里；从后台线程同步调用
+    /// 界面会抛 "Call from invalid thread" 并中断任务初始化。因此统一切回 UI 线程执行。
+    /// </summary>
+    private void DispatchSetOption(bool value)
+    {
+        var owner = OwnerViewModel;
+        if (owner == null) return;
+
+        if (Dispatcher.UIThread.CheckAccess())
+            owner.RequestSetOption(this, value);
+        else
+            Dispatcher.UIThread.Post(() => owner.RequestSetOption(this, value));
     }
 
     private MaaInterface.MaaInterfaceTask? _interfaceItem;

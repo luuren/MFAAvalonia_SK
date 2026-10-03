@@ -3248,7 +3248,8 @@ public class MaaProcessor
                 }
                 catch (Exception ex)
                 {
-                    LoggerHelper.Error($"停止窗口焦点监听失败：reason={ex.Message}", ex);
+                    // 命令线程上的任何异常都会走到这里，别把它伪装成"窗口焦点监听"失败
+                    LoggerHelper.Error($"命令执行失败：reason={ex.Message}", ex);
                 }
             }
         }
@@ -3414,7 +3415,7 @@ public class MaaProcessor
             LoggerHelper.Info("任务启动请求已忽略：当前已有任务链正在启动或运行。");
             return;
         }
-        EnqueueCommand(() => StartInternal(null, onlyStart, checkUpdate));
+        EnqueueCommand(() => RunStartCommand(() => StartInternal(null, onlyStart, checkUpdate)));
     }
 
     public void Start(List<DragItemViewModel> dragItemViewModels, bool onlyStart = false, bool checkUpdate = false, bool ignoreCheckedState = false)
@@ -3424,16 +3425,53 @@ public class MaaProcessor
             LoggerHelper.Info("任务启动请求已忽略：当前已有任务链正在启动或运行。");
             return;
         }
-        EnqueueCommand(() => StartInternal(dragItemViewModels, onlyStart, checkUpdate, ignoreCheckedState));
+        EnqueueCommand(() => RunStartCommand(() => StartInternal(dragItemViewModels, onlyStart, checkUpdate, ignoreCheckedState)));
     }
 
-    private Task StartInternal(List<DragItemViewModel>? dragItemViewModels, bool onlyStart, bool checkUpdate, bool ignoreCheckedState = false)
+    /// <summary>
+    /// 启动命令的兜底：TryBeginTaskRun 在真正跑任务链之前就会把界面切到"运行中"，
+    /// 一旦初始化任务列表阶段抛异常（例如界面调用从后台线程发起），EndTaskRun 永远不会被调到，
+    /// 界面就会一直卡在"执行中"（按钮停在"停止"、标签角标亮）而其实什么都没跑。
+    /// 这里保证任何启动阶段异常都会复位运行状态；真正的失败原因交给 CommandLoop 记录，
+    /// 避免同一条异常被写两次。
+    /// </summary>
+    private async Task RunStartCommand(Func<Task> startInternal)
+    {
+        try
+        {
+            await startInternal();
+        }
+        catch (OperationCanceledException)
+        {
+            EndTaskRun();
+        }
+        catch (Exception)
+        {
+            // StartInternal 只在任务链真正启动之后才返回，走到这里说明没启动成
+            EndTaskRun();
+        }
+    }
+
+    private async Task StartInternal(List<DragItemViewModel>? dragItemViewModels, bool onlyStart, bool checkUpdate, bool ignoreCheckedState = false)
     {
         using var logScope = BeginInstanceLogScope("StartTask", "Worker");
         // 保存当前的任务列表，以便在重新加载时保留用户调整的顺序和 check 状态
         var currentTasks = new Collection<DragItemViewModel>(ViewModel?.TaskItemViewModels.ToList() ?? new List<DragItemViewModel>());
 
-        if (InitializeData(currentTasks))
+        // InitializeData 会重建任务列表（可能触碰界面），失败时运行状态必须复位，
+        // 否则界面会一直停在"执行中"
+        bool initialized;
+        try
+        {
+            initialized = InitializeData(currentTasks);
+        }
+        catch
+        {
+            EndTaskRun();
+            throw;
+        }
+
+        if (initialized)
         {
             List<DragItemViewModel> tasks;
             if (dragItemViewModels == null)
@@ -3446,11 +3484,10 @@ public class MaaProcessor
             }
 
             _ = RunTaskChainAsync(tasks, onlyStart, checkUpdate);
-            return Task.CompletedTask;
+            return;
         }
 
         EndTaskRun();
-        return Task.CompletedTask;
     }
 
     private bool TryBeginTaskRun()
