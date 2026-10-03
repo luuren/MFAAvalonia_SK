@@ -1,4 +1,4 @@
-﻿<UserControl d:DesignHeight="450"
+<UserControl d:DesignHeight="450"
              d:DesignWidth="800"
              mc:Ignorable="d"
              x:Class="MFAAvalonia.Views.UserControls.Settings.ConnectSettingsUserControl"

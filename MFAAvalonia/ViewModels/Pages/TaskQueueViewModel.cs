@@ -2224,8 +2224,8 @@ public partial class TaskQueueViewModel : ViewModelBase, IDisposable
             || controllerType == MaaControllerTypes.Gamepad && controller?.Gamepad == null
             || controllerType == MaaControllerTypes.Win32 && controller?.Win32 == null)
         {
-            var idx = MatchPreviousWindow(windows, controllerType);
-            return (idx >= 0 ? idx : Math.Max(0, windows.FindIndex(win => !string.IsNullOrWhiteSpace(win.Name))), windows);
+            // 直接透传匹配结果：-1 表示"记着上次的窗口但这次找不到"，应保持未选中
+            return (MatchPreviousWindow(windows, controllerType), windows);
         }
 
         var filtered = windows.Where(win =>
@@ -2238,14 +2238,17 @@ public partial class TaskQueueViewModel : ViewModelBase, IDisposable
             _ => ApplyRegexFilters(filtered, controller!.Win32!)
         };
 
-        var matchedIdx = MatchPreviousWindow(filtered, controllerType);
-        return (matchedIdx >= 0 ? matchedIdx : (filtered.Count > 0 ? 0 : 0), filtered.ToList());
+        // 匹配不到时不回退到列表第一个：按上次连接的窗口标题严格恢复，宁可留空等用户手动选择
+        return (MatchPreviousWindow(filtered, controllerType), filtered.ToList());
     }
 
     /// <summary>
-    /// 在窗口列表中匹配上次选中的窗口（优先 ClassName+Name 完全匹配，其次 ClassName 匹配）。
-    /// 当 CurrentDevice 为 null（启动初始化时）会从保存的配置中读取上次选中的窗口信息进行匹配，
+    /// 在窗口列表中匹配本配置上次连接过的窗口。
+    /// 当 CurrentDevice 为 null（启动初始化时）会从保存的配置中读取上次选中的窗口标题进行匹配，
     /// 后续刷新时 CurrentDevice 已有值，不会走配置回退逻辑。
+    /// 多开场景下同名客户端的所有窗口类名相同，因此**只按窗口标题精确匹配**：
+    /// 命中则返回该下标；有记录但找不到同名窗口时返回 -1（由调用方保持未选中，等用户手动选择），
+    /// 绝不按类名回退到列表第一个，避免静默连到别的号。
     /// </summary>
     private int MatchPreviousWindow(List<DesktopWindowInfo> windows, MaaControllerTypes controllerType)
     {
@@ -2276,29 +2279,24 @@ public partial class TaskQueueViewModel : ViewModelBase, IDisposable
                 && string.Equals(w.Name, prev.Name, StringComparison.Ordinal));
             if (exactMatch >= 0) return exactMatch;
 
-            var classMatch = windows.FindIndex(w =>
-                string.Equals(w.ClassName, prev.ClassName, StringComparison.Ordinal));
-            if (classMatch >= 0) return classMatch;
-
-            return -1;
+            // 不按类名回退（多开时同类名窗口很多），交给下面的"上次连接的窗口标题"精确匹配
         }
 
         // 从保存的配置中匹配（用于启动后初始化，CurrentDevice 尚为 null）
-        var savedClassName = Processor.InstanceConfiguration.GetValue(ConfigurationKeys.DesktopWindowClassName, string.Empty);
+        // 只按窗口标题精确匹配：多开时各客户端窗口类名相同，按类名回退会连到列表里第一个窗口。
         var savedWindowName = Processor.InstanceConfiguration.GetValue(ConfigurationKeys.DesktopWindowName, string.Empty);
+        if (string.IsNullOrWhiteSpace(savedWindowName))
+            return -1;
 
-        if (!string.IsNullOrEmpty(savedClassName))
+        var nameMatch = windows.FindIndex(w => string.Equals(w.Name, savedWindowName, StringComparison.Ordinal));
+        if (nameMatch >= 0)
         {
-            var exactMatch = windows.FindIndex(w =>
-                string.Equals(w.ClassName, savedClassName, StringComparison.Ordinal)
-                && string.Equals(w.Name, savedWindowName, StringComparison.Ordinal));
-            if (exactMatch >= 0) return exactMatch;
-
-            var classMatch = windows.FindIndex(w =>
-                string.Equals(w.ClassName, savedClassName, StringComparison.Ordinal));
-            if (classMatch >= 0) return classMatch;
+            LoggerHelper.Info($"按上次连接的窗口标题匹配成功：{savedWindowName}（下标 {nameMatch}）");
+            return nameMatch;
         }
 
+        // 配置里记着上次连的窗口，但这次它不在：保持未选中，等用户手动选择，避免连到别的号
+        LoggerHelper.Warning($"上次连接的窗口未找到：{savedWindowName}，本次不自动选择连接窗口，请手动选择。");
         return -1;
     }
 

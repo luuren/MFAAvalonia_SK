@@ -1,4 +1,4 @@
-﻿using Avalonia.Controls;
+using Avalonia.Controls;
 using Avalonia.Controls.Notifications;
 using Avalonia.Media;
 using MaaFramework.Binding;
@@ -3930,8 +3930,11 @@ public class MaaProcessor
             DefaultValueHandling = DefaultValueHandling.Ignore
         })).ToMaaToken();
 
-        // PI v2.3.0 合并顺序：global_option < resource.option < controller.option < task.option
-        // 1. 合并全局选项（global_option，最低优先级）
+        // PI v2.3.0 合并顺序：setting（PI v2.8.0 任务设置页分区） < global_option < resource.option < controller.option < task.option
+        // 0. 合并任务设置页分区的选项（最低优先级，作为全局默认值）
+        MergeSettingOptionParams(ref taskModels);
+
+        // 1. 合并全局选项（global_option）
         MergeGlobalOptionParams(ref taskModels);
 
         // 2. 合并当前资源的全局选项参数（resource.option）
@@ -3966,6 +3969,46 @@ public class MaaProcessor
             SourceItem = task,
             RunId = runId
         };
+    }
+
+    /// <summary>
+    /// 合并 PI v2.8.0 setting 分区（任务设置页分区）的选项参数。
+    /// 每个分区在任务列表里对应一个合成项 "__Setting__{setting.Name}"，取值随实例配置保存在
+    /// ResourceOptionItems["__Setting__{name}"]，这里把它按最低优先级合并进 pipeline_override。
+    /// </summary>
+    private void MergeSettingOptionParams(ref MaaToken taskModels)
+    {
+        var settings = Interface?.Setting;
+        if (settings == null || settings.Count == 0)
+            return;
+
+        Dictionary<string, List<MaaInterface.MaaInterfaceSelectOption>>? savedOptions = null;
+        foreach (var setting in settings)
+        {
+            if (string.IsNullOrWhiteSpace(setting.Name))
+                continue;
+
+            var syntheticName = $"__Setting__{setting.Name}";
+
+            // 优先取任务列表里活动分区的当前取值（用户刚改的还没落盘也生效）
+            var selectOptions = ViewModel?.TaskItemViewModels
+                .FirstOrDefault(t => t.IsResourceOptionItem && t.ResourceItem?.Name == syntheticName)
+                ?.ResourceItem?.SelectOptions;
+
+            // 回退到实例配置中保存的取值（例如界面尚未构建该分区）
+            if (selectOptions == null || selectOptions.Count == 0)
+            {
+                savedOptions ??= InstanceConfiguration.GetValue(
+                    ConfigurationKeys.ResourceOptionItems,
+                    new Dictionary<string, List<MaaInterface.MaaInterfaceSelectOption>>());
+                selectOptions = savedOptions.GetValueOrDefault(syntheticName);
+            }
+
+            if (selectOptions == null || selectOptions.Count == 0)
+                continue;
+
+            ProcessOptions(ref taskModels, selectOptions);
+        }
     }
 
     /// <summary>
