@@ -3581,17 +3581,18 @@ public class MaaProcessor
 
         var token = CancellationTokenSource.Token;
 
-        // A python-for-android Agent runs in a separate process. Android may reclaim
-        // that service after the previous run moved MFA behind the target game while
-        // the controller itself remains connected. Recreate the complete tasker/Agent
-        // session for each user-started queue so a stale ZeroMQ client is never reused.
+        // Agent（Python/Node 等，任意平台）跑在独立进程里：它的 IPC 监听可能静默失效——
+        // 进程还在（甚至不会触发 Releasing 事件），而所有 custom reco/action 调用都只失败于
+        // "server is not alive"，最终只表现为一个毫不相干的模板/OCR 超时（实测：答题界面已经
+        // 打开，却 21 次都调不到自定义识别器，20 秒后 Task timeout）。
+        // 因此每个用户发起的队列都重建完整 tasker/Agent 会话，绝不复用已失效的 agent client。
+        // 这段守卫原本仅 Android 生效（Android 会在上一轮任务把 MFA 切到后台后回收该服务）；
+        // Win32 桌面存在完全相同的失效模式，故放开到所有平台。
         if (!onlyStart
-            && OperatingSystem.IsAndroid()
-            && PlatformAgentFactory.Start != null
             && AgentHelper.HasAgentConfigs(Interface?.Agent)
             && MaaTasker != null)
         {
-            LoggerHelper.Info("Android Agent session will be recreated before this task queue.");
+            LoggerHelper.Info("任务队列开始前重建 MaaTasker/Agent 会话，避免复用已失效的 Agent 连接。");
             SetTasker();
         }
 
@@ -5112,6 +5113,7 @@ public class MaaProcessor
             tasker.Resource.Register(new Custom.WebhookAction());
             tasker.Resource.Register(new Custom.HeiLiuAction((content, color) => AddLog(content, color)));
             tasker.Resource.Register(new Custom.SwitchInstanceAction(this));
+            tasker.Resource.Register(new Custom.StartTeamMembersAction(this));
             LoggerHelper.Info("已注册内置特殊任务动作。");
 
             // 获取当前资源的自定义目录
