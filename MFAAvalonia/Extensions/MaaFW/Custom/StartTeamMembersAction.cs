@@ -95,7 +95,7 @@ public class StartTeamMembersAction : IMaaCustomAction
                     continue;
                 }
 
-                // 与队长侧同一套规则：队伍命令 的选项优先，其次回退 发起组队 的选项，且优先取非默认项
+                // 与队长侧同一套规则：见 PickCase（勾选的任务 > 显式保存过的索引 > 非默认项 > 候选顺序）
                 var candidates = CandidateEntries(targetEntries, taskName, triggerTaskName);
                 var memberRoleValue = PickCase(candidates, roleOption);
                 var memberTeamValue = PickCase(candidates, teamOption);
@@ -157,43 +157,54 @@ public class StartTeamMembersAction : IMaaCustomAction
     // 启动目标配置
     // ------------------------------------------------------------------
 
+    /// <summary>
+    /// 拉起一个目标配置。整段（懒加载配置、取界面模型、恢复连接目标、开始任务）都放到主线程，
+    /// 与「全局启动」（GlobalStartManager.StartInstance）保持同一套线程模型：
+    /// 界面模型是 Avalonia 对象，在主线程之外创建/驱动容易出隐性故障。
+    /// 由 Task.Run 调用，所以不会卡住任务回调线程。
+    /// </summary>
     private async Task StartInstanceAsync(string instanceId, bool skipRunning)
     {
+        var started = false;
         try
         {
-            var manager = MaaProcessorManager.Instance;
-            manager.EnsureInstanceLoaded(instanceId);
-
-            if (!manager.TryGetInstance(instanceId, out var processor) || processor == null)
-            {
-                LoggerHelper.Warning($"[StartTeamMembersAction] 目标配置加载失败：{instanceId}");
-                _owner.AddLog($"[发起组队] 目标配置加载失败：{instanceId}");
-                return;
-            }
-
-            if (skipRunning && processor.IsTaskRunActive)
-            {
-                LoggerHelper.Info($"[StartTeamMembersAction] 目标配置 {instanceId} 已在运行，跳过");
-                _owner.AddLog($"[发起组队] 配置 {instanceId} 已在运行，跳过");
-                return;
-            }
-
-            var vm = manager.GetViewModel(instanceId);
-            if (vm == null)
-            {
-                LoggerHelper.Warning($"[StartTeamMembersAction] 目标配置没有可用的界面模型：{instanceId}");
-                _owner.AddLog($"[发起组队] 目标配置不可用：{instanceId}");
-                return;
-            }
-
             await DispatcherHelper.RunOnMainThreadAsync(() =>
             {
+                var manager = MaaProcessorManager.Instance;
+                manager.EnsureInstanceLoaded(instanceId);
+
+                if (!manager.TryGetInstance(instanceId, out var processor) || processor == null)
+                {
+                    LoggerHelper.Warning($"[StartTeamMembersAction] 目标配置加载失败：{instanceId}");
+                    _owner.AddLog($"[发起组队] 目标配置加载失败：{instanceId}");
+                    return;
+                }
+
+                if (skipRunning && processor.IsTaskRunActive)
+                {
+                    LoggerHelper.Info($"[StartTeamMembersAction] 目标配置 {instanceId} 已在运行，跳过");
+                    _owner.AddLog($"[发起组队] 配置 {instanceId} 已在运行，跳过");
+                    return;
+                }
+
+                var vm = manager.GetViewModel(instanceId);
+                if (vm == null)
+                {
+                    LoggerHelper.Warning($"[StartTeamMembersAction] 目标配置没有可用的界面模型：{instanceId}");
+                    _owner.AddLog($"[发起组队] 目标配置不可用：{instanceId}");
+                    return;
+                }
+
                 // 与“全局启动”一致：先按本配置记住的窗口恢复连接目标，再走开始任务入口
                 vm.TryReadAdbDeviceFromConfig(inTask: false, refresh: false, allowAutoDetect: true, showToast: false);
                 vm.StartTask();
+                started = true;
             });
 
-            LoggerHelper.Info($"[StartTeamMembersAction] 已为配置 {instanceId} 执行开始任务");
+            if (started)
+            {
+                LoggerHelper.Info($"[StartTeamMembersAction] 已为配置 {instanceId} 执行开始任务");
+            }
         }
         catch (Exception ex)
         {
@@ -429,12 +440,22 @@ public class StartTeamMembersAction : IMaaCustomAction
     }
 
     /// <summary>
-    /// 按候选顺序取选项的 case 名：优先返回「不是默认项」的那一个，都没有时返回第一个能解析出来的。
-    /// 这样「队伍编号只填在 发起组队 上」和「只填在 队伍命令 上」都能读到正确的队伍。
+    /// 取某个选项的 case 名。候选是「队伍命令」→「发起组队」两份选项（见 CandidateEntries），
+    /// 按三个信号打分，取分最高的那个（同分时保留先出现的候选，也就是「队伍命令」优先）：
+    ///
+    ///   4 分：该任务在本配置里是**勾选**的 —— 这才是这个配置真正会跑的任务，它的选项才代表行为；
+    ///   2 分：该任务**显式保存过**这个选项的索引（而不是"没保存、回落到默认项"）；
+    ///   1 分：该值不是默认项（默认项经常只是"没填过"的痕迹）。
+    ///
+    /// 不能只看"是不是默认项"（旧规则）：队员配置的「队伍命令」正常就是默认项 队员，
+    /// 而**没勾选**的「发起组队」里可能躺着一个陈旧的 队长 索引（早期版本没有 default_case 时
+    /// 写进去的 0），旧规则会把它当成"用户特意填的"优先采用 → 队员全被解析成队长 →
+    /// 队长一个队员都拉不起来（2026-10-30 实测：4 个队员配置全部解析成 队伍角色=队长）。
     /// </summary>
     private static string? PickCase(IReadOnlyList<TaskEntry> candidates, string optionName)
     {
-        string? first = null;
+        string? best = null;
+        var bestScore = int.MinValue;
         foreach (var entry in candidates)
         {
             var name = ResolveCaseName(entry, optionName, out var isDefaultCase);
@@ -443,14 +464,22 @@ public class StartTeamMembersAction : IMaaCustomAction
                 continue;
             }
 
-            first ??= name;
-            if (!isDefaultCase)
+            var explicitIndex = entry.OptionIndexes.ContainsKey(optionName);
+            var score = (entry.Checked ? 4 : 0)
+                + (explicitIndex ? 2 : 0)
+                + (isDefaultCase ? 0 : 1);
+
+            LoggerHelper.Debug(
+                $"[StartTeamMembersAction] 选项 {optionName} 候选：{entry.Name}（勾选={entry.Checked}、显式索引={explicitIndex}）→ {name}，{score} 分");
+
+            if (score > bestScore)
             {
-                return name;
+                bestScore = score;
+                best = name;
             }
         }
 
-        return first;
+        return best;
     }
 
     /// <summary>
@@ -491,9 +520,6 @@ public class StartTeamMembersAction : IMaaCustomAction
 
         return index >= 0 && index < cases.Count ? cases[index].Name : null;
     }
-
-    private static string? ResolveCaseName(TaskEntry entry, string optionName)
-        => ResolveCaseName(entry, optionName, out _);
 
     private static string ReadString(JObject param, string key, string fallback)
     {
