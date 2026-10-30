@@ -403,6 +403,15 @@ public partial class TaskQueueViewModel : ViewModelBase, IDisposable
     {
         try
         {
+            // 任务运行中不重建资源列表：重建过程会把 CurrentResource 瞬时置空再写回，
+            // 触发 UpdateTasksForResource / SetTasker，直接把运行中的队列打断。
+            if (Processor.IsTaskRunActive)
+            {
+                LoggerHelper.Debug(
+                    $"任务运行中跳过资源列表重建（实例={Processor.InstanceId}，target={targetResource}）");
+                return;
+            }
+
             if (MaaProcessor.Interface == null)
             {
                 LoggerHelper.Warning("界面资源接口尚未初始化完成。");
@@ -2879,6 +2888,17 @@ public partial class TaskQueueViewModel : ViewModelBase, IDisposable
 
             if (string.Equals(_currentResource, value, StringComparison.Ordinal))
             {
+                return;
+            }
+
+            // 任务运行中严禁改动资源：下面会 ResetTaskerInBackground → SetTasker，
+            // 把正在跑的 MaaTasker / Agent 停掉，整条队列随即被判失败
+            // （2026-10-31 01:11:33 切页签 → ChangeResource 空→PC → 普陀队列全灭）。
+            // 资源切换只允许在空闲时发生；运行中的请求直接忽略并留日志。
+            if (Processor.IsTaskRunActive)
+            {
+                LoggerHelper.Warning(
+                    $"任务运行中忽略资源变更：{_currentResource} -> {value}（实例={Processor.InstanceId}），避免重建 Tasker 打断任务");
                 return;
             }
 

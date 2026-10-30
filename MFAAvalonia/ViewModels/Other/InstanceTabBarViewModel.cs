@@ -407,6 +407,15 @@ public partial class InstanceTabBarViewModel : ViewModelBase
                     return;
                 }
 
+                // IsRunning 只在队列计数变化时刷新，可能滞后于真实运行状态；
+                // 再用 processor 侧的运行标志兜一层（2026-10-31 切页签把普陀队列整条拆掉的根因）。
+                if (processor.IsTaskRunActive)
+                {
+                    LoggerHelper.Info(
+                        $"[SwitchInstance] 实例 {processor.InstanceId} 正在运行任务，跳过控制器/资源重建");
+                    return;
+                }
+
                 taskViewModel.InitializeControllerOptions();
                 taskViewModel.UpdateResourcesForController(taskViewModel.CurrentResource);
             });
