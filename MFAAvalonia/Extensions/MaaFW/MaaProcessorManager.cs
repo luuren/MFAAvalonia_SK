@@ -1144,6 +1144,12 @@ public sealed class MaaProcessorManager
 
             _isLazyLoadingComplete = false;
         }
+
+        // “上次使用”的实例被排除在懒加载队列之外，懒加载预热不会覆盖它；
+        // 启动后的活动页签也可能被页签初始化切到别的实例（见 SwitchToInstance），
+        // 于是它既没有预热、也没有走启动自动连接，会一直停在“请选择窗口”连不上。
+        // 这里为当前实例单独补一次连接目标恢复。
+        WarmupConnectionSelection(Current);
     }
     /// <summary>
     /// 扫描 config/instances/ 目录，返回所有实例文件的 ID
